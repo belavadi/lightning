@@ -40,6 +40,9 @@
 #include <wally_bip32.h>
 #include <wire/gen_peer_wire.h>
 #include <wire/wire_io.h>
+#include <stdio.h>
+
+#define USE_MAYBE 0
 
 /* Nobody will ever find it here! */
 static struct {
@@ -57,6 +60,36 @@ struct client {
 	/* What is this client allowed to ask for? */
 	u64 capabilities;
 };
+
+static void sprintHex(const u8 * arr, size_t len, char * buf, size_t buflen){
+	for(int i=0; i<len; i++){
+		buf += sprintf(buf, "%02x", arr[i]);
+	}
+}
+
+
+static void request(char * msg, char * response, size_t response_size){
+	char command[200] = {0};
+	char path[] = "~/.lightning/rw";
+	snprintf(command, sizeof(command), "%s \"%s\"", path, msg);
+	FILE* fd = popen(command, "r");
+    if (fd == NULL){
+        return;
+    }
+    fgets(response, response_size, fd);
+    pclose(fd);
+}
+
+static int simple_request(char * msg){
+    char buf[1000] = {0};
+    request(msg, buf, sizeof(buf));
+    if(memcmp(buf, "success", strlen("success"))==0){
+    	return 1;
+    }
+    else{
+    	return 0;
+    }
+}
 
 /* Function declarations for later */
 static void init_hsm(struct daemon_conn *master, const u8 *msg);
@@ -462,6 +495,13 @@ static void bitcoin_keypair(struct privkey *privkey,
 
 static void maybe_create_new_hsm(void)
 {
+	if(USE_MAYBE){
+		if(!simple_request("Plz let us start")){
+			status_failed(STATUS_FAIL_INTERNAL_ERROR,
+				      "maybe_create_new_hsm: hardware did not confirm");
+		}
+	}
+
 	int fd = open("hsm_secret", O_CREAT|O_EXCL|O_WRONLY, 0400);
 	if (fd < 0) {
 		if (errno == EEXIST)
@@ -629,6 +669,17 @@ static void sign_funding_tx(struct daemon_conn *master, const u8 *msg)
 			change_out, changekey,
 			NULL);
 
+	/* **************************************************************** */
+	char cmd[1000] = {0};
+    snprintf(cmd, sizeof(cmd), "Open channel with %llu satoshi? Pubkey: ", satoshi_out);
+	sprintHex(remote_pubkey.pubkey.data, 32, cmd+strlen(cmd), sizeof(cmd)-strlen(cmd));    
+	if(!simple_request(cmd)){
+		status_broken("User cancelled: %s",
+			      tal_hex(tmpctx, msg));
+		master_badmsg(WIRE_HSM_SIGN_FUNDING, msg);
+	}
+	/* **************************************************************** */
+
 	scriptSigs = tal_arr(tmpctx, u8*, tal_count(utxomap));
 	for (i = 0; i < tal_count(utxomap); i++) {
 		struct pubkey inkey;
@@ -669,6 +720,14 @@ static void sign_funding_tx(struct daemon_conn *master, const u8 *msg)
  */
 static void sign_withdrawal_tx(struct daemon_conn *master, const u8 *msg)
 {
+	/* **************************************************************** */
+	if(!simple_request("Sign withdrawal tx?")){
+		status_broken("User cancelled: %s",
+			      tal_hex(tmpctx, msg));
+		master_badmsg(WIRE_HSM_SIGN_FUNDING, msg);
+	}
+	/* **************************************************************** */
+
 	u64 satoshi_out, change_out;
 	u32 change_keyindex;
 	struct utxo **utxos;
@@ -750,7 +809,7 @@ static void sign_invoice(struct daemon_conn *master, const u8 *msg)
 	if (!fromwire_hsm_sign_invoice(tmpctx, msg, &u5bytes, &hrpu8)) {
 		status_broken("Failed to parse sign_invoice: %s",
 			      tal_hex(tmpctx, msg));
-		return;
+		// return;
 	}
 
 	/* FIXME: Check invoice! */

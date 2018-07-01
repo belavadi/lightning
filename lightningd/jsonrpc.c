@@ -143,6 +143,16 @@ static const struct json_command dev_crash_command = {
 AUTODATA(json_command, &dev_crash_command);
 #endif /* DEVELOPER */
 
+char * hardware_wallet_present(void)
+{
+	int fd = get_hardware_wallet_fd();
+	if(fd >= 0) {
+		return "connected";
+	}
+	return "disconnected";
+}
+
+
 static void json_getinfo(struct command *cmd,
 			 const char *buffer UNUSED, const jsmntok_t *params UNUSED)
 {
@@ -172,6 +182,7 @@ static void json_getinfo(struct command *cmd,
 	json_add_string(response, "version", version());
 	json_add_num(response, "blockheight", get_block_height(cmd->ld->topology));
 	json_add_string(response, "network", get_chainparams(cmd->ld)->network_name);
+	json_add_string(response, "hardwarewallet", hardware_wallet_present());
 	json_object_end(response);
 	command_success(cmd, response);
 }
