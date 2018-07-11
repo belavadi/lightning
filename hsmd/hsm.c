@@ -70,6 +70,8 @@ struct client {
 
 /* **************** HARDWARE LIGHTNING CODE ******************* */
 
+// TODO: refactor! move to common headers
+
 // set serial port settings
 static int set_interface_attribs(int fd, int speed, int parity){
     struct termios tty;
