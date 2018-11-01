@@ -42,6 +42,13 @@
 #include <wire/wire_io.h>
 #include <stdio.h>
 
+#include <errno.h>
+#include <fcntl.h> 
+#include <string.h>
+#include <termios.h>
+#include <unistd.h>
+#include <stdio.h>
+
 #define USE_MAYBE 0
 
 /* Nobody will ever find it here! */
@@ -61,25 +68,106 @@ struct client {
 	u64 capabilities;
 };
 
+/* **************** HARDWARE LIGHTNING CODE ******************* */
+
+// TODO: refactor! move to common headers
+
+// set serial port settings
+static int set_interface_attribs(int fd, int speed, int parity){
+    struct termios tty;
+    memset (&tty, 0, sizeof tty);
+    if (tcgetattr (fd, &tty) != 0)
+    {
+            printf ("error %d from tcgetattr", errno);
+            return -1;
+    }
+
+    cfsetospeed (&tty, speed);
+    cfsetispeed (&tty, speed);
+
+    tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;     // 8-bit chars
+    // disable IGNBRK for mismatched speed tests; otherwise receive break
+    // as \000 chars
+    tty.c_iflag &= ~IGNBRK;         // disable break processing
+    tty.c_lflag = 0;                // no signaling chars, no echo,
+                                    // no canonical processing
+    tty.c_oflag = 0;                // no remapping, no delays
+    tty.c_cc[VMIN]  = 0;            // read doesn't block
+    tty.c_cc[VTIME] = 5;            // 0.5 seconds read timeout
+
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY); // shut off xon/xoff ctrl
+
+    tty.c_cflag |= (CLOCAL | CREAD);// ignore modem controls,
+                                    // enable reading
+    tty.c_cflag &= ~(PARENB | PARODD);      // shut off parity
+    tty.c_cflag |= parity;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CRTSCTS;
+
+    if (tcsetattr (fd, TCSANOW, &tty) != 0)
+    {
+            printf ("error %d from tcsetattr", errno);
+            return -1;
+    }
+    return 0;
+}
+
+static void set_blocking(int fd, int should_block){
+    struct termios tty;
+    memset (&tty, 0, sizeof tty);
+    if (tcgetattr (fd, &tty) != 0)
+    {
+            printf ("error %d from tggetattr", errno);
+            return;
+    }
+
+    tty.c_cc[VMIN]  = should_block ? 1 : 0;
+    tty.c_cc[VTIME] = 5;            // 0.5 seconds read timeout
+
+    if (tcsetattr (fd, TCSANOW, &tty) != 0)
+            printf ("error %d setting term attributes", errno);
+}
+
+// prints array in hex representation to buffer
 static void sprintHex(const u8 * arr, size_t len, char * buf, size_t buflen){
 	for(int i=0; i<len; i++){
 		buf += sprintf(buf, "%02x", arr[i]);
 	}
 }
 
-
+// asks hardware device for user confirmation
 static void request(char * msg, char * response, size_t response_size){
-	char command[200] = {0};
-	char path[] = "~/.lightning/rw";
-	snprintf(command, sizeof(command), "%s \"%s\"", path, msg);
-	FILE* fd = popen(command, "r");
-    if (fd == NULL){
-        return;
+
+    char *portname = "/dev/cu.usbmodem1461"; // should be loaded from ~/.lightning/hsm_config
+
+    int fd = open (portname, O_RDWR | O_NOCTTY | O_SYNC);
+    if (fd < 0)
+    {
+            printf ("error %d opening %s: %s", errno, portname, strerror (errno));
+            return;
     }
-    fgets(response, response_size, fd);
-    pclose(fd);
+
+    set_interface_attribs (fd, B9600, 0);  // set speed to 115,200 bps, 8n1 (no parity)
+    set_blocking (fd, 0);                // set no blocking
+
+    write(fd, msg, strlen(msg));
+
+    int n = 0;
+    int done = 0;
+    char buf [3000] = { 0 };
+    int timeout = 10000;
+    while(!done && (timeout >0)){
+        timeout--;
+        usleep (100);
+        n += read(fd, buf+n, sizeof(buf)-n);  // read up to 100 characters if ready to read
+        if(buf[n-1] == '\n'){
+            done = 1;
+        }
+    }
+    memcpy(response, buf, strlen(buf)); // should check if length is enough
 }
 
+// just parses if user confirmed or not
 static int simple_request(char * msg){
     char buf[1000] = {0};
     request(msg, buf, sizeof(buf));
@@ -90,6 +178,8 @@ static int simple_request(char * msg){
     	return 0;
     }
 }
+
+/* ************* END OF HARDWARE LIGHTNING CODE **************** */
 
 /* Function declarations for later */
 static void init_hsm(struct daemon_conn *master, const u8 *msg);
